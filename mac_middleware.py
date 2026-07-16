@@ -2,7 +2,7 @@ import asyncio
 import uuid
 import uvicorn
 from dataclasses import dataclass, field
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 
 @dataclass(order=True)
 class RequestItem:
@@ -13,37 +13,26 @@ class RequestItem:
 
 app = FastAPI()
 
-# The Decoupled Priority Queue (Your core contribution)
 request_queue = asyncio.PriorityQueue()
 
-# Global state to mock KV cache monitoring on your Mac
-active_requests = 0
-MAX_CONCURRENT_REQUESTS = 5 # Set low so you can easily trigger the throttle on your screen
+# Robust concurrency management using asyncio primitives
+MAX_CONCURRENT_REQUESTS = 5
+gpu_semaphore = None  # Must be initialized inside the async event loop
 
 class PredictorMock:
-    """
-    Simulates your OPT-125M model ranking requests on the Mac.
-    """
     @staticmethod
     def rank_request(prompt: str) -> int:
         length = len(prompt.split())
-        if length < 10:
-            return 1  # High priority (short task)
-        elif length < 30:
-            return 2  # Medium priority
-        else:
-            return 3  # Low priority
+        if length < 10: return 1
+        elif length < 30: return 2
+        else: return 3
 
 class CostAnalyzer:
-    """
-    Simulates the C_rec < C_swap mathematical decision rule from Slide 7.
-    """
     @staticmethod
     def evaluate_eviction(prompt: str) -> str:
-        # Mock calculation based on prompt length
         tokens = len(prompt.split())
-        recompute_cost = tokens * 0.5  # Simulated ms to just regenerate later
-        swap_cost = 80.0               # Simulated ms baseline to move over PCIe bus
+        recompute_cost = tokens * 0.5
+        swap_cost = 80.0
         
         if recompute_cost < swap_cost:
             return "DROP_AND_RECOMPUTE"
@@ -51,76 +40,74 @@ class CostAnalyzer:
             return "SAVE_AND_SWAP"
 
 async def mock_vllm_engine(prompt: str):
-    """
-    Mocks the NVIDIA GPU processing. Simulates the time it takes to generate tokens.
-    """
-    generation_time = len(prompt.split()) * 0.1  # 100ms per word simulation
-    await asyncio.sleep(generation_time)
-    return f"[M1 SIMULATION SUCCESS] Generated output for prompt: '{prompt}'"
+    generation_time = len(prompt.split()) * 0.1
+    # Enforce a minimum sleep so concurrency overlap is easily visible during testing
+    await asyncio.sleep(max(0.5, generation_time)) 
+    return f"[GPU SIMULATION SUCCESS] Generated output for prompt: '{prompt}'"
 
-async def process_task(prompt, future, req_id, priority):
-    """
-    Processes the individual task concurrently to simulate parallel GPU execution.
-    """
-    global active_requests
+async def process_task(item: RequestItem):
+    """Executes the task and safely releases the GPU slot when finished."""
     try:
-        result_text = await mock_vllm_engine(prompt)
-        future.set_result(result_text)
+        result_text = await mock_vllm_engine(item.prompt)
+        if not item.future.done():
+            item.future.set_result(result_text)
     except Exception as e:
-        future.set_exception(e)
+        if not item.future.done():
+            item.future.set_exception(e)
     finally:
-        active_requests -= 1
+        # Crucial: Release the slot so the dispatcher can send the next request
+        gpu_semaphore.release()
         request_queue.task_done()
 
 async def dynamic_dispatcher():
     """
-    The Gatekeeper: Polls the queue, runs cost analysis, and throttles dispatch.
+    The Gatekeeper. 
+    Replaces the global counter and sleep-loops with an asyncio.Semaphore.
     """
-    global active_requests
     while True:
-        if active_requests >= MAX_CONCURRENT_REQUESTS:
-            # Peek at the next request to evaluate its cost before acting
-            item = await request_queue.get()
-            
-            # Run the mathematical thresholding from Slide 7
+        # 1. Grab the highest priority item from the queue
+        item = await request_queue.get()
+        
+        # 2. Check if the GPU is at maximum capacity
+        if gpu_semaphore.locked():
             decision = CostAnalyzer.evaluate_eviction(item.prompt)
             
             if decision == "DROP_AND_RECOMPUTE":
-                print(f"⚠️ [THROTTLE ENGAGED] Cache full ({active_requests}/{MAX_CONCURRENT_REQUESTS}). [COST ANALYSIS: Recompute < Swap]. Yielding and dropping...")
+                print(f"⚠️ [THROTTLE] Cache full. [Recompute < Swap]. Dropping request {item.req_id[:6]}")
+                
+                # Fix: Resolve the future with an error so the client HTTP request ends
+                if not item.future.done():
+                    item.future.set_exception(RuntimeError("429_TOO_MANY_REQUESTS"))
+                request_queue.task_done()
+                continue
             else:
-                print(f"⚠️ [THROTTLE ENGAGED] Cache full ({active_requests}/{MAX_CONCURRENT_REQUESTS}). [COST ANALYSIS: Swap < Recompute]. Initiating PCIe Swap...")
-            
-            # Put the request back in the queue to hold it
-            await request_queue.put(item)
-            request_queue.task_done()
-            
-            await asyncio.sleep(0.5)
-            continue
+                print(f"⏳ [THROTTLE] Cache full. [Swap < Recompute]. Holding request {item.req_id[:6]}...")
+                # Fix: Block cleanly until a slot opens. No busy-wait loops.
+                await gpu_semaphore.acquire()
+        else:
+            # We have immediate capacity
+            await gpu_semaphore.acquire()
         
-        # Get the highest priority request if memory is clear
-        item = await request_queue.get()
-        
-        active_requests += 1
-        print(f"✅ [DISPATCH] Processing request {item.req_id[:6]}... (Priority {item.priority}, Active: {active_requests})")
-        
-        # Dispatch concurrently to simulate parallel GPU execution
-        asyncio.create_task(process_task(item.prompt, item.future, item.req_id, item.priority))
+        # 3. Dispatch the task concurrently
+        print(f"✅ [DISPATCH] Processing request {item.req_id[:6]}... (Priority {item.priority})")
+        asyncio.create_task(process_task(item))
 
 @app.on_event("startup")
 async def startup_event():
+    global gpu_semaphore
+    # Initialize the semaphore here so it attaches to the running async loop
+    gpu_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
     asyncio.create_task(dynamic_dispatcher())
-    print("🚀 M1 Middleware Gatekeeper Initialized. Awaiting traffic...")
+    print("🚀 Linux Middleware Gatekeeper Initialized. Awaiting traffic...")
 
 @app.post("/generate")
 async def generate(request: Request):
     data = await request.json()
     prompt = data.get("prompt", "Default short prompt")
     
-    # 1. Rank the request
     priority = PredictorMock.rank_request(prompt)
     req_id = str(uuid.uuid4())
     
-    # 2. Stage in Priority Queue
     loop = asyncio.get_running_loop()
     future = loop.create_future()
     
@@ -129,9 +116,15 @@ async def generate(request: Request):
     
     print(f"📥 [QUEUED] Request {req_id[:6]} added with Priority {priority}.")
     
-    # 3. Wait for execution
-    result = await future
-    return {"id": req_id, "priority_assigned": priority, "text": result}
+    try:
+        # Wait for the dispatcher/worker to fulfill the future
+        result = await future
+        return {"id": req_id, "priority_assigned": priority, "text": result}
+    except RuntimeError as e:
+        # Catch the exception set by the dispatcher and translate it to an HTTP error
+        if "429" in str(e):
+            raise HTTPException(status_code=429, detail="Server overloaded. Request dropped per cost-analysis.")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
