@@ -1,7 +1,15 @@
 import asyncio
 import uuid
 import uvicorn
+from dataclasses import dataclass, field
 from fastapi import FastAPI, Request
+
+@dataclass(order=True)
+class RequestItem:
+    priority: int
+    req_id: str = field(compare=False)
+    prompt: str = field(compare=False)
+    future: asyncio.Future = field(compare=False)
 
 app = FastAPI()
 
@@ -72,10 +80,10 @@ async def dynamic_dispatcher():
     while True:
         if active_requests >= MAX_CONCURRENT_REQUESTS:
             # Peek at the next request to evaluate its cost before acting
-            priority, req_id, prompt, future = await request_queue.get()
+            item = await request_queue.get()
             
             # Run the mathematical thresholding from Slide 7
-            decision = CostAnalyzer.evaluate_eviction(prompt)
+            decision = CostAnalyzer.evaluate_eviction(item.prompt)
             
             if decision == "DROP_AND_RECOMPUTE":
                 print(f"⚠️ [THROTTLE ENGAGED] Cache full ({active_requests}/{MAX_CONCURRENT_REQUESTS}). [COST ANALYSIS: Recompute < Swap]. Yielding and dropping...")
@@ -83,20 +91,20 @@ async def dynamic_dispatcher():
                 print(f"⚠️ [THROTTLE ENGAGED] Cache full ({active_requests}/{MAX_CONCURRENT_REQUESTS}). [COST ANALYSIS: Swap < Recompute]. Initiating PCIe Swap...")
             
             # Put the request back in the queue to hold it
-            await request_queue.put((priority, req_id, prompt, future))
+            await request_queue.put(item)
             request_queue.task_done()
             
             await asyncio.sleep(0.5)
             continue
         
         # Get the highest priority request if memory is clear
-        priority, req_id, prompt, future = await request_queue.get()
+        item = await request_queue.get()
         
         active_requests += 1
-        print(f"✅ [DISPATCH] Processing request {req_id[:6]}... (Priority {priority}, Active: {active_requests})")
+        print(f"✅ [DISPATCH] Processing request {item.req_id[:6]}... (Priority {item.priority}, Active: {active_requests})")
         
         # Dispatch concurrently to simulate parallel GPU execution
-        asyncio.create_task(process_task(prompt, future, req_id, priority))
+        asyncio.create_task(process_task(item.prompt, item.future, item.req_id, item.priority))
 
 @app.on_event("startup")
 async def startup_event():
@@ -115,7 +123,9 @@ async def generate(request: Request):
     # 2. Stage in Priority Queue
     loop = asyncio.get_running_loop()
     future = loop.create_future()
-    await request_queue.put((priority, req_id, prompt, future))
+    
+    item = RequestItem(priority=priority, req_id=req_id, prompt=prompt, future=future)
+    await request_queue.put(item)
     
     print(f"📥 [QUEUED] Request {req_id[:6]} added with Priority {priority}.")
     
