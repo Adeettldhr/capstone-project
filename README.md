@@ -27,7 +27,7 @@ pip install -r requirements.txt
 ```
 
 ## Usage
-To execute the middleware, ensure your virtual environment is active and run:
+To execute or to simply run the middleware, ensure your virtual environment is active, and run:
 
 ```bash
 python mac_middleware.py
