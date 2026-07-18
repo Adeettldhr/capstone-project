@@ -23,10 +23,13 @@ CLIENT_TIMEOUT_SECONDS = 30.0
 class PredictorMock:
     @staticmethod
     def rank_request(prompt: str) -> int:
-        length = len(prompt.split())
-        if length < 10: return 1
-        elif length < 30: return 2
-        else: return 3
+        # Instead of coarse buckets (1/2/3), we decided to use predicted output length
+        # as the actual priority number. Lower number = shorter request = processed first 
+        # This is where LTR scheduling is taking place
+        # On A100: replace this with actual OPT-125M inference.
+        input_tokens = len(prompt.split())
+        predicted_output = int(input_tokens * 2.5)  # realistic output estimate
+        return predicted_output
 
 class CostAnalyzer:
     @staticmethod
