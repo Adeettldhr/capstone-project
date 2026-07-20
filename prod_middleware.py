@@ -1,8 +1,19 @@
 import asyncio
 import uuid
 import uvicorn
+import os
 from dataclasses import dataclass, field
 from fastapi import FastAPI, Request, HTTPException
+from groq import Groq
+from dotenv import load_dotenv
+
+# Groq API client — replaces both OPT-125M predictor and vLLM engine
+# Due to lack of access to A100 GPU hardware, we use Groq's free API
+# which runs Llama-3.1-8B in the cloud as our inference backend.
+
+load_dotenv()
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+groq_client = Groq(api_key=GROQ_API_KEY)
 
 @dataclass(order=True)
 class RequestItem:
@@ -23,16 +34,26 @@ CLIENT_TIMEOUT_SECONDS = 30.0
 class PredictorMock:
     @staticmethod
     def rank_request(prompt: str) -> int:
-        # Instead of coarse buckets (1/2/3), we use predicted output length
-        # as the actual priority number. Lower number = shorter request = 
-        # processed first. This is real LTR scheduling.
-        # Due to the lack of access to A100 GPU hardware and OPT-125M inference,
-        # we are using the Groq API with Llama-3.1-8B as a substitute inference
-        # backend to simulate real predicted output length.
-        # On the A100, which is future deployment, we should replace this with actual OPT-125M inference.
-        input_tokens = len(prompt.split())
-        predicted_output = int(input_tokens * 2.5)  # realistic output estimate
-        return predicted_output
+        # Uses Groq API with Llama-3.1-8B to predict response length.
+        # This replaces OPT-125M inference which requires A100 access.
+        # Shorter predicted output = higher priority in the LTR queue.
+        try:
+            response = groq_client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": f"Reply with only a single number. How many words will your answer be if I asked you this: {prompt}"
+                    }
+                ],
+                max_tokens=10
+            )
+            predicted_length = int(response.choices[0].message.content.strip())
+            return predicted_length
+        except:
+            # Fallback if Groq call fails for any reason
+            input_tokens = len(prompt.split())
+            return int(input_tokens * 2.5)
 
 class CostAnalyzer:
     @staticmethod
@@ -53,10 +74,20 @@ class CostAnalyzer:
             return "SAVE_AND_SWAP"
 
 async def mock_vllm_engine(prompt: str):
-    generation_time = len(prompt.split()) * 0.1
-    await asyncio.sleep(max(0.5, generation_time)) 
-    return f"[GPU SIMULATION SUCCESS] Generated output for prompt: '{prompt}'"
-
+    # Real LLM inference via Groq API running Llama-3.1-8B.
+    # This replaces the simulated asyncio.sleep() from before.
+    # Due to lack of A100 access, Groq serves as our inference backend.
+    # On A100 (future deployment): replace with vllm.AsyncLLMEngine.
+    loop = asyncio.get_running_loop()
+    response = await loop.run_in_executor(
+        None,
+        lambda: groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=500
+        )
+    )
+    return response.choices[0].message.content
 async def process_task(item: RequestItem):
     """Executes the task and safely releases the GPU slot."""
     try:
