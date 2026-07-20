@@ -37,9 +37,15 @@ class PredictorMock:
 class CostAnalyzer:
     @staticmethod
     def evaluate_eviction(prompt: str) -> str:
+        # swap_cost now scales with request size instead of being
+        # hardcoded at 80.0 — longer requests cost more to move
+        # to CPU RAM and back, so they are more worth saving.
+        # Due to lack of access to A100 GPU hardware, these costs
+        # are estimated values. On A100 (future deployment): replace
+        # with real PCIe bandwidth measurements from vLLM.
         tokens = len(prompt.split())
         recompute_cost = tokens * 0.5
-        swap_cost = 80.0
+        swap_cost = tokens * 1.5  # scales with size: bigger = more expensive to swap
         
         if recompute_cost < swap_cost:
             return "DROP_AND_RECOMPUTE"
