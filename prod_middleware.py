@@ -145,6 +145,24 @@ async def startup_event():
     asyncio.create_task(dynamic_dispatcher())
     print("🚀 Linux Middleware Gatekeeper Initialized. Awaiting traffic...")
 
+@app.get("/status")
+async def get_status():
+    # Live monitoring endpoint — shows current system health.
+    # Useful for demoing the middleware and checking if it's working.
+    return {
+        "system": "LTR Middleware Running",
+        "gpu_slots": {
+            "total": MAX_CONCURRENT_REQUESTS,
+            "in_use": MAX_CONCURRENT_REQUESTS - gpu_semaphore._value if gpu_semaphore else 0,
+            "available": gpu_semaphore._value if gpu_semaphore else MAX_CONCURRENT_REQUESTS
+        },
+        "queue": {
+            "waiting": request_queue.qsize(),
+        },
+        "info": "Visit /docs to send prompts and test the middleware"
+    }
+
+
 @app.post("/generate")
 async def generate(request: Request):
     data = await request.json()
