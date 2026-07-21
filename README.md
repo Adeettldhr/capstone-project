@@ -1,4 +1,4 @@
-# Capstone Defense: Decoupled Gatekeeper Middleware
+# Capstone Defense: Overcoming Overfitting in LTR-Based Scheduling for Large Language Models
 
 ## Overview
 This repository contains the asynchronous middleware component (`prod_middleware.py`) for our capstone project: **Overcoming Overfitting in LTR-Based Scheduling for Large Language Models**.
