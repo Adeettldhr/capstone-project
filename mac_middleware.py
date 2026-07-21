@@ -1,51 +1,65 @@
 import asyncio
+import os
 import uuid
 import uvicorn
+import httpx
+from contextlib import asynccontextmanager
+from pydantic import BaseModel
 from dataclasses import dataclass, field
 from fastapi import FastAPI, Request, HTTPException
 
-# We use a dataclass to package the request data together.
-# order=True allows the PriorityQueue to sort these objects automatically.
+# ---------------------------------------------------------
+# CONFIGURATION & STATE
+# ---------------------------------------------------------
+ENVIRONMENT = os.getenv("ENVIRONMENT", "LOCAL")
+CLIENT_TIMEOUT_SECONDS = 30.0
+MAX_CONCURRENT_REQUESTS = 5
+
+request_queue = asyncio.PriorityQueue()
+gpu_semaphore = None 
+
+# Strict input validation prevents malformed payloads from crashing the parser
+class GenerateRequest(BaseModel):
+    prompt: str
+
 @dataclass(order=True)
 class RequestItem:
-    # The queue sorts entirely based on this integer. Lower number = higher priority.
     priority: int
-    
-    # compare=False tells the queue to ignore these fields during sorting.
-    # This is mandatory because asyncio.Future objects cannot be compared mathematically.
-    # Without this, if two items have the exact same priority, the queue will crash 
-    # trying to compare their req_id or future.
     req_id: str = field(compare=False)
     prompt: str = field(compare=False)
     future: asyncio.Future = field(compare=False)
 
-app = FastAPI()
-
-# A thread-safe queue that automatically orders items by their priority number.
-request_queue = asyncio.PriorityQueue()
-
-# The maximum number of tasks the GPU can handle at exactly the same time.
-MAX_CONCURRENT_REQUESTS = 5
-
-# A Semaphore is like a bouncer at a club with a strict capacity.
-# It holds a set number of "tickets" (MAX_CONCURRENT_REQUESTS). 
-# A task must take a ticket to run, and return it when done.
-gpu_semaphore = None 
-
-class PredictorMock:
+# ---------------------------------------------------------
+# PREDICTORS & CACHE LOGIC
+# ---------------------------------------------------------
+class Predictor:
     @staticmethod
-    def rank_request(prompt: str) -> int:
-        # Simple logic to assign priority: shorter prompts get processed first (priority 1).
-        length = len(prompt.split())
-        if length < 10: return 1
-        elif length < 30: return 2
-        else: return 3
+    async def rank_request(prompt: str) -> int:
+        """
+        Dynamically routes ranking logic based on the environment.
+        MUST be async to prevent blocking the event loop during HTTP calls.
+        """
+        input_tokens = len(prompt.split())
+        
+        if ENVIRONMENT == "PRODUCTION":
+            # Real LTR scheduling using external API (e.g., Groq/Llama-3.1-8B)
+            # async with httpx.AsyncClient() as client:
+            #     response = await client.post(...)
+            
+            # Simulated Groq response delay and calculation
+            await asyncio.sleep(0.1) 
+            predicted_output = int(input_tokens * 2.5)
+            return predicted_output
+            
+        else:
+            # Local fast mock using coarse buckets (1/2/3)
+            if input_tokens < 10: return 1
+            elif input_tokens < 30: return 2
+            else: return 3
 
 class CostAnalyzer:
     @staticmethod
     def evaluate_eviction(prompt: str) -> str:
-        # Simulates the math deciding if it's faster to drop a request and make the user 
-        # ask again later, or to pause it and move it to system RAM (PCIe Swap).
         tokens = len(prompt.split())
         recompute_cost = tokens * 0.5
         swap_cost = 80.0
@@ -55,117 +69,94 @@ class CostAnalyzer:
         else:
             return "SAVE_AND_SWAP"
 
+# ---------------------------------------------------------
+# WORKERS & DISPATCHER
+# ---------------------------------------------------------
 async def mock_vllm_engine(prompt: str):
-    # Simulates the actual text generation on the GPU.
     generation_time = len(prompt.split()) * 0.1
     await asyncio.sleep(max(0.5, generation_time)) 
-    return f"[GPU SIMULATION SUCCESS] Generated output for prompt: '{prompt}'"
+    return f"[SIMULATION SUCCESS | ENV: {ENVIRONMENT}] Generated output for prompt."
 
 async def process_task(item: RequestItem):
-    """Handles the actual execution of a single request."""
     try:
-        # Wait for the AI model to finish generating text
+        if item.future.cancelled():
+            return
+
         result_text = await mock_vllm_engine(item.prompt)
         
-        # If the user hasn't disconnected, send the generated text back to them
         if not item.future.done():
             item.future.set_result(result_text)
             
     except Exception as e:
-        # If the AI model crashes, pass the error back to the user so they know it failed
         if not item.future.done():
             item.future.set_exception(e)
             
     finally:
-        # CRITICAL: This ensures that no matter what happens (success or crash),
-        # the "ticket" is returned to the bouncer so the next request in line can start.
         gpu_semaphore.release()
-        
-        # Tell the queue this specific item is fully completed
         request_queue.task_done()
 
 async def dynamic_dispatcher():
-    """
-    The Gatekeeper. This runs in an infinite background loop.
-    It constantly watches the queue and controls traffic to the GPU.
-    """
     while True:
-        # 1. Pull the highest priority request out of the waiting line.
         item = await request_queue.get()
         
-        # 2. Check if the GPU is completely full right now.
+        if item.future.cancelled():
+            request_queue.task_done()
+            continue
+        
         if gpu_semaphore.locked():
-            
-            # The GPU is full. We have to decide what to do with this request.
             decision = CostAnalyzer.evaluate_eviction(item.prompt)
             
             if decision == "DROP_AND_RECOMPUTE":
-                print(f"⚠️ [THROTTLE] Cache full. [Recompute < Swap]. Dropping request {item.req_id[:6]}")
-                
-                # We decided it's too expensive to hold this in memory. 
-                # We trigger an error inside the user's connection so they get a "Too Many Requests" response.
+                print(f"⚠️ [THROTTLE] Cache full. Dropping request {item.req_id[:6]}")
                 if not item.future.done():
                     item.future.set_exception(RuntimeError("429_TOO_MANY_REQUESTS"))
-                
-                # Mark it done in the queue and skip to the next iteration of the loop
                 request_queue.task_done()
                 continue
             else:
-                print(f"⏳ [THROTTLE] Cache full. [Swap < Recompute]. Holding request {item.req_id[:6]}...")
-                
-                # We decided to keep it. The dispatcher pauses exactly here and waits 
-                # until a task finishes and returns a ticket to the semaphore.
+                print(f"⏳ [THROTTLE] Cache full. Holding request {item.req_id[:6]}...")
                 await gpu_semaphore.acquire()
         else:
-            # The GPU is NOT full. Take a ticket immediately.
             await gpu_semaphore.acquire()
         
-        # 3. We have a ticket. Send the request to the GPU to be processed in the background.
         print(f"✅ [DISPATCH] Processing request {item.req_id[:6]}... (Priority {item.priority})")
-        
-        # create_task runs process_task concurrently, allowing this loop to immediately 
-        # move on to grab the next request in the queue.
         asyncio.create_task(process_task(item))
 
-@app.on_event("startup")
-async def startup_event():
+# ---------------------------------------------------------
+# API ENDPOINTS & LIFESPAN
+# ---------------------------------------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     global gpu_semaphore
-    # We must create the Semaphore here so it hooks into FastAPI's async event loop
     gpu_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
-    
-    # Start the background traffic controller
     asyncio.create_task(dynamic_dispatcher())
-    print("🚀 Linux Middleware Gatekeeper Initialized. Awaiting traffic...")
+    print(f"🚀 {ENVIRONMENT} Gatekeeper Initialized. Awaiting traffic...")
+    yield
+
+app = FastAPI(lifespan=lifespan)
 
 @app.post("/generate")
-async def generate(request: Request):
-    # 1. Parse the incoming HTTP request
-    data = await request.json()
-    prompt = data.get("prompt", "Default short prompt")
-    
-    # 2. Determine how important this request is
-    priority = PredictorMock.rank_request(prompt)
+async def generate(request: GenerateRequest):
+    priority = await Predictor.rank_request(request.prompt)
     req_id = str(uuid.uuid4())
     
-    # 3. Create a Future. This is an empty box. We will give this box to the queue,
-    # and we will pause this HTTP endpoint until the dispatcher puts the final answer inside the box.
     loop = asyncio.get_running_loop()
     future = loop.create_future()
     
-    # 4. Package everything up and put it in the priority queue
-    item = RequestItem(priority=priority, req_id=req_id, prompt=prompt, future=future)
+    item = RequestItem(priority=priority, req_id=req_id, prompt=request.prompt, future=future)
     await request_queue.put(item)
     
     print(f"📥 [QUEUED] Request {req_id[:6]} added with Priority {priority}.")
     
     try:
-        # 5. Pause and wait for the empty box (future) to be filled with the result
-        result = await future
+        result = await asyncio.wait_for(future, timeout=CLIENT_TIMEOUT_SECONDS)
         return {"id": req_id, "priority_assigned": priority, "text": result}
         
+    except asyncio.TimeoutError:
+        future.cancel()
+        print(f"❌ [TIMEOUT] Request {req_id[:6]} timed out in queue. Abandoning.")
+        raise HTTPException(status_code=504, detail="Gateway Timeout: Request spent too long in queue.")
+        
     except RuntimeError as e:
-        # 6. If the dispatcher put a "429_TOO_MANY_REQUESTS" error in the box instead of a result,
-        # catch it and translate it into a proper HTTP status code for the user.
         if "429" in str(e):
             raise HTTPException(status_code=429, detail="Server overloaded. Request dropped per cost-analysis.")
         raise HTTPException(status_code=500, detail=str(e))
