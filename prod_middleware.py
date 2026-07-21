@@ -48,8 +48,11 @@ class CostAnalyzer:
     @staticmethod
     def evaluate_eviction(prompt: str) -> str:
         tokens = len(prompt.split())
-        recompute_cost = tokens * 0.5
-        swap_cost = tokens * 1.5 
+        recompute_cost = tokens * 2.0  # Cost to generate from scratch
+        
+        # 30.0 is the static overhead of moving data across the PCIe bus.
+        # 0.2 is the tiny cost of storing the actual tokens.
+        swap_cost = 30.0 + (tokens * 0.2) 
         
         if recompute_cost < swap_cost:
             return "DROP_AND_RECOMPUTE"
