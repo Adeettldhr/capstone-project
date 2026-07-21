@@ -6,15 +6,15 @@
 \usepackage{graphicx}
 \usepackage{textcomp}
 \usepackage{xcolor}
+\usepackage{float}
 \usepackage[colorlinks=true, allcolors=black]{hyperref}
-\usepackage{lipsum} % Used to simulate page lengths; replace with your final expanded text.
 
 \def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
     T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
 
 \begin{document}
 
-\title{Group 05: Overcoming Overfitting in LTR-Based Scheduling for Large Language Models}
+\title{Group XX: Overcoming Overfitting in LTR-Based Scheduling for Large Language Models}
 
 \author{\IEEEauthorblockN{Adeet Tuladhar}
 \IEEEauthorblockA{\textit{Department of Computer Science} \\
@@ -32,7 +32,7 @@ v.kalapati@student.fdu.edu}
 \maketitle
 
 % ---------------------------------------------------
-% ABSTRACT (1/4 Page, 2 Paragraphs, No Citations)
+% ABSTRACT
 % ---------------------------------------------------
 \begin{abstract}
 When deploying Large Language Models (LLMs) to production, the most critical operational bottleneck is memory capacity rather than compute speed. Standard inference engines utilize a First-Come-First-Serve (FCFS) scheduling system that processes incoming user prompts in the exact order they arrive. During traffic surges, this naive approach causes severe Head-of-Line (HOL) blocking, where a single massive request exhausts the Key-Value (KV) cache, leading to fatal memory allocation conflicts and system-wide crashes. While recent systems research has proposed using Learning-to-Rank (LTR) algorithms to predict prompt complexity and prioritize shorter tasks, these models frequently overfit to synthetic training data, rendering them dangerously brittle when exposed to the highly heterogeneous nature of real-world human interactions.
@@ -43,82 +43,83 @@ In this project, we present a Decoupled Gatekeeper architecture that physically 
 
 
 % ---------------------------------------------------
-% INTRODUCTION (1 Page, Starts New Page, No Subsections)
+% INTRODUCTION 
 % ---------------------------------------------------
 \section{Introduction}
 If a production deployment of a Large Language Model receives fifty simultaneous queries, the hardware is highly likely to crash. This systemic fragility occurs because generating autoregressive text requires the system to temporarily store preceding attention matrices, known as the KV cache, in the GPU's Video RAM (VRAM) \cite{b1}. As traffic scales, this cache expands linearly, rapidly exhausting physical memory limits. When VRAM is fully allocated, the underlying memory manager is forced into preemptive block evictions that frequently cascade into fatal segmentation faults, bringing the entire server offline \cite{b5}. Addressing this memory constraint is the single most important problem in modern AI infrastructure, as it directly dictates the financial viability and reliability of efficiently scaling enterprise LLM deployments \cite{b11}. 
 
-Current state-of-the-art inference engines attempt to manage this constraint using static First-Come-First-Serve (FCFS) policies \cite{b4}. FCFS fundamentally fails under high load because it introduces Head-of-Line (HOL) blocking. If a complex, context-heavy prompt enters the queue first, it dominates the hardware, stalling all subsequent, lighter interactive tasks. To alleviate this, recent literature has explored Learning-to-Rank (LTR) scheduling, which predicts the computational weight of incoming prompts to reorder the queue intelligently \cite{b7}. Unfortunately, these models are predominantly trained on rigid, synthetic datasets. When confronted with real-world, out-of-distribution human prompts—such as malformed code snippets or conversational colloquialisms—the predictors suffer catastrophic accuracy collapse. The system reverts to HOL blocking and crashes regardless. 
+Current state-of-the-art inference engines attempt to manage this constraint using static First-Come-First-Serve (FCFS) policies \cite{b4}. FCFS fundamentally fails under high load because it introduces Head-of-Line (HOL) blocking. If a complex, context-heavy prompt enters the queue first, it dominates the hardware, stalling all subsequent, lighter interactive tasks. The lack of queue awareness means that short, computational inexpensive prompts are trapped behind massive generative sequences, artificially inflating average response latency and degrading user experience. As production models grow in parameter count, the memory required for a single context window grows exponentially, exacerbating the HOL blocking phenomenon to the point where FCFS is no longer a viable scheduling mechanism for enterprise applications.
 
-Our high-level design resolves this crisis through a Decoupled Gatekeeper architecture. Rather than embedding fragile predictive logic directly into the C++ memory manager, we intercept all incoming HTTP requests via an asynchronous Python middleware layer. This layer acts as a strict admission controller, evaluating prompt complexity using a heavily regularized OPT-125M model trained on actual human interactions, ensuring the GPU is never allocated more work than it can mathematically sustain \cite{b3}. If the hardware is full, a dynamic cost-analysis heuristic either holds the request in host RAM or aggressively drops it based on real-time PCIe bandwidth constraints.
+To alleviate this, recent literature has explored Learning-to-Rank (LTR) scheduling, which predicts the computational weight of incoming prompts to reorder the queue intelligently \cite{b7}. By prioritizing tasks that require minimal KV cache allocation, LTR systems theoretically maximize throughput and keep interactive latencies low. Unfortunately, these models are predominantly trained on rigid, synthetic datasets. When confronted with real-world, out-of-distribution human prompts—such as malformed code snippets, conversational colloquialisms, or ambiguous instructions—the predictors suffer catastrophic accuracy collapse. The ranker misclassifies the generative complexity, causing the memory manager to blind-allocate resources it does not possess. The system reverts to HOL blocking and crashes regardless. 
 
-The contributions of this work are as follows:
-\begin{itemize}
-    \item We design a Decoupled Gatekeeper utilizing an asynchronous priority queue to physically isolate VRAM allocation from unconstrained HTTP traffic surges.
-    \item We resolve LTR overfitting by training an OPT-125M predictor on the heterogeneous LMSYS-Chat-1M dataset, applying L2 regularization to accurately predict generative complexity.
-    \item We define and validate a real-time thresholding heuristic that dynamically routes requests between Drop-and-Recompute or Save-and-Swap, successfully achieving a zero-fault system crash rate.
-\end{itemize}
+Our high-level design resolves this crisis through a Decoupled Gatekeeper architecture. Rather than embedding fragile predictive logic directly into the C++ memory manager, we intercept all incoming HTTP requests via an asynchronous Python middleware layer. This layer acts as a strict admission controller, evaluating prompt complexity using a heavily regularized OPT-125M model trained on actual human interactions, ensuring the GPU is never allocated more work than it can mathematically sustain \cite{b3}. If the hardware is full, a dynamic cost-analysis heuristic either holds the request in host RAM or aggressively drops it based on real-time PCIe bandwidth constraints, protecting the underlying hardware from saturation.
+
+
+
 
 
 
 % ---------------------------------------------------
-% BACKGROUND (1.5 Pages, Starts New Page, 2 Figures, Subsections)
+% BACKGROUND 
 % ---------------------------------------------------
 \section{Background}
 
 \subsection{LLM Memory Constraints and KV Cache}
-To comprehend the necessity of a Decoupled Gatekeeper, it is vital to examine the specific memory access patterns of modern transformer architectures. During the autoregressive decoding phase, the model predicts a single token sequentially. To avoid recalculating the multi-head attention scores for all previously generated tokens, the system caches the Key and Value matrices at each layer \cite{b8}. While model weights are static and predictable, the KV cache grows dynamically in direct proportion to both the batch size and the sequence length of the active prompt. 
+To comprehend the necessity of a Decoupled Gatekeeper, it is vital to examine the specific memory access patterns of modern transformer architectures. During the autoregressive decoding phase, the model predicts a single token sequentially. To avoid recalculating the multi-head attention scores for all previously generated tokens, the system caches the Key and Value matrices at each layer \cite{b8}. While model weights are static and predictable, the KV cache grows dynamically in direct proportion to both the batch size and the sequence length of the active prompt. The sheer size of this cache creates a severe memory bandwidth bottleneck that fundamentally restricts the batching capabilities of modern inference engines.
 
-On memory-constrained devices, VRAM is rapidly consumed by these active tensors. When VRAM is fully allocated, the execution engine is forced to halt computation, drop contexts, or swap data to host memory via the PCIe bus. As documented in high-performance computing studies like DeepSpeed-Inference, these forced PCIe transfers completely disrupt the execution pipeline and heavily degrade raw throughput \cite{b12}.
+On memory-constrained devices, VRAM is rapidly consumed by these active tensors. When VRAM is fully allocated, the execution engine is forced to halt computation, drop contexts, or swap data to host memory via the PCIe bus. As documented in high-performance computing studies like DeepSpeed-Inference, these forced PCIe transfers completely disrupt the execution pipeline and heavily degrade raw throughput \cite{b12}. The PCIe bus, while fast, possesses a fraction of the bandwidth of internal GPU memory. Saturating it with KV cache swaps creates a secondary bottleneck, stalling the compute kernels as they wait for data to traverse the motherboard.
 
 \begin{figure}[h]
-\centerline{\includegraphics[width=0.45\textwidth]{diagram1.png}}
+\centering
+\includegraphics[width=\columnwidth, height=12cm]{diagram1.png}
 \caption{System architecture diagram illustrating the bottleneck between the priority queue, the asynchronous gatekeeper, and the GPU memory manager.}
 \label{fig:arch1}
 \end{figure}
 
 \subsection{The Role of Learning-to-Rank in Scheduling}
-Learning-to-Rank (LTR) originated in information retrieval to order search engine results optimally \cite{b7}. In the context of LLM scheduling, LTR is adapted to predict the number of output tokens a specific prompt will generate. If a system can accurately forecast that a prompt will require massive VRAM expansion, it can defer that request until sufficient memory is available, prioritizing shorter, interactive prompts to maximize overall system throughput. 
+Learning-to-Rank (LTR) originated in information retrieval to order search engine results optimally \cite{b7}. In the context of LLM scheduling, LTR is adapted to predict the number of output tokens a specific prompt will generate. If a system can accurately forecast that a prompt will require massive VRAM expansion, it can defer that request until sufficient memory is available, prioritizing shorter, interactive prompts to maximize overall system throughput. The scheduling paradigm shifts from chronological processing to complexity-based dispatching, mirroring shortest-job-first scheduling in traditional operating systems.
 
-The challenge lies entirely in the accuracy of the predictor. If the LTR model assigns an artificially low score to a massive sequence due to overfitting, the memory manager will blind-allocate resources it does not possess, triggering the aforementioned allocation faults. Training these predictive models on highly variant human data rather than synthetically generated templates is paramount to the stability of the entire pipeline.
-
-
-
-\subsection{Asynchronous Middleware Design}
-In standard serving architectures, HTTP requests are routed directly from the API endpoint into the continuous batching engine \cite{b4}. This tight coupling means that when the engine hangs due to a memory fault, all network connections simultaneously timeout. Implementing an asynchronous middleware layer, such as a Python \texttt{asyncio} loop, creates a strategic buffer. By separating network I/O from GPU kernel execution, the middleware can actively reject or pause incoming requests based on telemetry data, ensuring the hardware only receives workloads it is mathematically guaranteed to complete without crashing.
+The challenge lies entirely in the accuracy of the predictor. If the LTR model assigns an artificially low score to a massive sequence due to overfitting, the memory manager will blind-allocate resources it does not possess, triggering the aforementioned allocation faults. Training these predictive models on highly variant human data rather than synthetically generated templates is paramount to the stability of the entire pipeline. When models memorize syntax rather than evaluating true generative intent, their utility as a scheduling heuristic drops to zero.
 
 \begin{figure}[h]
-\centerline{\includegraphics[width=0.45\textwidth]{diagram2.png}}
+\centerline{\includegraphics[width=\columnwidth, height=12cm]{diagram2.png}}
 \caption{Schematic diagram demonstrating the thresholding decision path between recomputing attention states and transferring data across the PCIe bus.}
 \label{fig:arch2}
 \end{figure}
 
+\subsection{Asynchronous Middleware Design}
+In standard serving architectures, HTTP requests are routed directly from the API endpoint into the continuous batching engine \cite{b4}. This tight coupling means that when the engine hangs due to a memory fault, all network connections simultaneously timeout. Implementing an asynchronous middleware layer, such as a Python \texttt{asyncio} loop, creates a strategic buffer. By separating network I/O from GPU kernel execution, the middleware can actively reject or pause incoming requests based on telemetry data, ensuring the hardware only receives workloads it is mathematically guaranteed to complete without crashing. This decoupling is standard practice in web microservices, yet heavily underutilized in low-level AI inference engines.
+
+
+
+
 % ---------------------------------------------------
-% RELATED WORK (1 Page, Starts New Page, No Figures)
+% RELATED WORK 
 % ---------------------------------------------------
 \section{Related Work}
 
 \subsection{Static and Reactive Scheduling Frameworks}
 The fundamental challenge of KV cache memory management has dominated systems research over the past five years. The most impactful framework in this domain is vLLM, which introduced PagedAttention in 2023 \cite{b1}. PagedAttention significantly mitigates memory fragmentation by partitioning the KV cache into fixed-size blocks, drawing inspiration from virtual memory paging in traditional operating systems. While this represents a major paradigm shift in baseline capacity, vLLM relies on a purely reactive, static eviction policy. When it runs out of memory, it defaults to swapping the least recently used blocks to CPU RAM. This static approach assumes all swaps are equally valuable, failing to account for the temporal cost of recomputing short prompts versus long prompts. 
 
-Similarly, frameworks like FastServe (2023) focus on preemptive scheduling based on elapsed execution time \cite{b5}. Other high-throughput systems, such as Sarathi \cite{b10} and related generative chunking engines \cite{b6}, attempt to maximize theoretical throughput during steady-state operations by splitting compute phases. However, their core limitation remains an inability to intercept sudden traffic spikes before they hit the hardware layer, meaning they still suffer from reactive bottlenecking and allocation faults when concurrency limits are abruptly breached.
+Similarly, frameworks like FastServe (2023) focus on preemptive scheduling based on elapsed execution time \cite{b5}. By utilizing a multi-level feedback queue, FastServe forces longer generations to yield hardware resources to newer requests. Other high-throughput systems, such as Sarathi \cite{b10} and related generative chunking engines \cite{b6}, attempt to maximize theoretical throughput during steady-state operations by splitting compute phases into manageable micro-batches. This phase-splitting drastically improves the utilization of Tensor Cores. However, their core limitation remains an inability to intercept sudden traffic spikes before they hit the hardware layer. Because they lack a predictive admission controller, they still suffer from reactive bottlenecking and catastrophic allocation faults when physical concurrency limits are abruptly breached by anomalous traffic surges.
 
 \subsection{Machine Learning for Systems Scheduling}
-Integrating predictive machine learning models directly into systems scheduling is a rapidly expanding area of research. Orca (2022) pioneered sequence-level iteration, allowing continuous batching of varying sequence lengths, drastically improving baseline throughput \cite{b4}. Building upon this, recent experimental systems have attempted to integrate LTR models to guess output lengths. The primary strength of these state-of-the-art LTR implementations is their ability to theoretically eliminate Head-of-Line blocking in controlled environments \cite{b9}.
+Integrating predictive machine learning models directly into systems scheduling is a rapidly expanding area of research, representing a shift from heuristic-driven to data-driven resource allocation. Orca (2022) pioneered sequence-level iteration, allowing continuous batching of varying sequence lengths, drastically improving baseline throughput \cite{b4}. Building upon this framework, recent experimental systems have attempted to integrate LTR models to guess output lengths prior to execution. The primary strength of these state-of-the-art LTR implementations, such as Splitwise \cite{b9}, is their ability to theoretically eliminate Head-of-Line blocking in controlled, simulated environments by strictly segregating prompt processing from token generation.
 
-However, the fatal limitation of these approaches is their brittleness in production. Because they are predominantly trained on highly structured, template-based datasets, they achieve high accuracy in benchmarks but fail catastrophically when presented with out-of-distribution human data. Our research diverges from these approaches by isolating the predictive model from the low-level execution engine entirely and anchoring our training exclusively on heterogeneous, real-world interactions to ensure robust generalization \cite{b2}.
+However, the fatal limitation of these approaches is their brittleness in production deployments. Because they are predominantly trained on highly structured, template-based datasets, they achieve remarkably high accuracy in academic benchmarks but fail catastrophically when presented with out-of-distribution human data. Users frequently submit malformed queries, grammatically incorrect prompts, or highly ambiguous instructions that these synthetic predictors misclassify. Our research diverges from these approaches by isolating the predictive model from the low-level execution engine entirely and anchoring our training exclusively on heterogeneous, real-world interactions to ensure robust generalization \cite{b2}. By decoupling the predictor, we ensure that an inaccurate prediction does not intrinsically crash the underlying C++ manager.
+
 
 
 
 % ---------------------------------------------------
-% METHODOLOGY (1 Page, Starts New Page, No Figures, 2 Tables)
+% METHODOLOGY 
 % ---------------------------------------------------
 \section{Methodology}
-To overcome the overfitting observed in previous implementations, we designed a Decoupled Gatekeeper architecture driven by a regularized predictive model. We utilized an OPT-125M \cite{b3} sequence classification model trained on the LMSYS-Chat-1M dataset to ensure the predictor was exposed strictly to human-generated, out-of-distribution conversational data \cite{b2}. To execute this architecture locally and simulate hardware constraints, we built the middleware layer utilizing Python 3.10 and the native \texttt{asyncio} library to safely manage concurrency and network I/O \cite{b13}. 
+To overcome the overfitting observed in previous implementations, we designed a Decoupled Gatekeeper architecture driven by a regularized predictive model. We utilized an OPT-125M \cite{b3} sequence classification model trained on the LMSYS-Chat-1M dataset to ensure the predictor was exposed strictly to human-generated, out-of-distribution conversational data \cite{b2}. This dataset contains a massive corpus of raw interactions, including logic queries, coding tasks, and conversational colloquialisms, ensuring the model generalizes effectively. To execute this architecture locally and simulate hardware constraints, we built the middleware layer utilizing Python 3.10 and the native \texttt{asyncio} library to safely manage concurrency and network I/O \cite{b13}. 
 
-The ranking objective for the LTR model was formalized using a pairwise loss function. To prevent the model from memorizing specific prompt templates, we applied aggressive L2 weight decay (Ridge regularization) to the cross-entropy loss. This forced the network to evaluate underlying generative complexity rather than structural syntax. The fully trained predictor was then integrated into our FastAPI gatekeeper as an asynchronous dependency.
+The ranking objective for the LTR model was formalized using a pairwise loss function. To prevent the model from memorizing specific prompt templates—the primary cause of overfitting in prior literature—we applied aggressive L2 weight decay (Ridge regularization) to the cross-entropy loss. By penalizing large weight values, the regularization forced the network to evaluate underlying generative complexity rather than structural syntax. The fully trained predictor was then integrated into our FastAPI gatekeeper as an asynchronous dependency, scoring each incoming payload before routing it to the queue.
 
-Rather than modifying a fragile C++ PagedAttention manager, we implemented admission control utilizing an \texttt{asyncio.PriorityQueue} and an \texttt{asyncio.Semaphore}. The semaphore strictly caps the active concurrent capacity of the KV cache. When incoming traffic exceeds this mathematical boundary, the system calculates a real-time decision rule comparing the cost of recomputation ($C_{Rec}$) versus the cost of swapping data to host RAM over the PCIe bus ($C_{Swap}$). If $C_{Rec} < C_{Swap}$, the middleware immediately drops the request and returns an HTTP 429 error, protecting system bandwidth. 
+Rather than modifying a fragile C++ PagedAttention manager, we implemented admission control utilizing an \texttt{asyncio.PriorityQueue} and an \texttt{asyncio.Semaphore}. The semaphore strictly caps the active concurrent capacity of the KV cache at $C_{max}$. When incoming traffic exceeds this mathematical boundary, the system calculates a real-time decision rule comparing the cost of recomputation ($C_{Rec}$) versus the cost of swapping data to host RAM over the PCIe bus ($C_{Swap}$). The recomputation cost is derived from the prompt token length ($N$) multiplied by the baseline generation time ($t_{gen}$). If $C_{Rec} < C_{Swap}$, the middleware immediately drops the request and returns an HTTP 429 error, protecting system bandwidth. 
 
 To replicate our results, a researcher must configure the experimental platform environment according to the parameters specified in the tables below. The software stack requires PyTorch \cite{b14} and the HuggingFace Transformers library \cite{b15} for model execution, Uvicorn for ASGI server hosting, and matplotlib for generating all evaluation data visualizations. 
 
@@ -161,27 +162,28 @@ Queue Timeout Threshold & 30.0 seconds \\
 
 
 
+
 % ---------------------------------------------------
-% EVALUATION (3 Pages, Starts New Page, 6 Figures [matplotlib])
+% EVALUATION
 % ---------------------------------------------------
 \section{Evaluation}
 
 \subsection{Simulation Environment and Stability Bounds}
-To validate the mathematical models independently of hardware-specific anomalies, we developed a localized architectural simulation proxy. The environment constrained concurrent capacity to exactly five simultaneous processes and utilized simulated variables for token generation latency (100ms per token) and static swap thresholds (80.0ms) to test the decision boundaries. This isolated testing environment allowed us to measure the exact point of failure for legacy scheduling systems against our decoupled approach. 
+To validate the mathematical models independently of hardware-specific anomalies, we developed a localized architectural simulation proxy. The environment constrained concurrent capacity to exactly five simultaneous processes and utilized simulated variables for token generation latency (100ms per token) and static swap thresholds (80.0ms) to test the decision boundaries. This isolated testing environment allowed us to measure the exact point of failure for legacy scheduling systems against our decoupled approach, completely isolating the HTTP routing logic from external network noise. 
 
-The fundamental metric of success in our evaluation was system survival under extreme duress. Standard inference engines frequently crash when traffic spikes force the KV cache to expand beyond physical bounds. By shifting the queue logic into the Python middleware, our system physically blocked over-allocation. The priority queue successfully intercepted overflowing requests, yielding a 100\% task completion rate without triggering a single segmentation fault in the underlying mocked engine. 
+The fundamental metric of success in our evaluation was system survival under extreme duress. Standard inference engines frequently crash when traffic spikes force the KV cache to expand beyond physical bounds. By shifting the queue logic into the Python middleware, our system physically blocked over-allocation. The priority queue successfully intercepted overflowing requests, yielding a 100\% task completion rate without triggering a single segmentation fault in the underlying mocked engine. Legacy FCFS engines suffered immediate fatal errors the moment the concurrency threshold was breached.
 
 \begin{figure}[h]
-\centerline{\includegraphics[width=0.45\textwidth]{fig1_throughput.png}}
+\centerline{\includegraphics[width=\columnwidth]{fig1_throughput.png}}
 \caption{Impact of concurrent traffic spikes on system throughput, generated using matplotlib. The Gatekeeper achieves 100\% survival.}
 \label{fig:throughput}
 \end{figure}
 
 \subsection{Queue Latency and Head-of-Line Blocking}
-By sorting the waiting requests based on the complexity predicted by our OPT-125M model, the middleware systematically dismantled Head-of-Line blocking. Figure \ref{fig:latency} illustrates the latency distribution across a randomized batch of prompts. Shorter, highly interactive requests were aggressively pulled to the front of the queue, resulting in an average latency reduction of 32\% for interactive traffic compared to the FCFS baseline. The longer requests were safely deferred until the hardware had sufficient memory capacity to process them without interrupting active streams. 
+By sorting the waiting requests based on the complexity predicted by our OPT-125M model, the middleware systematically dismantled Head-of-Line blocking. Figure \ref{fig:latency} illustrates the latency distribution across a randomized batch of prompts. Shorter, highly interactive requests were aggressively pulled to the front of the queue, resulting in an average latency reduction of 32\% for interactive traffic compared to the FCFS baseline. The longer requests were safely deferred until the hardware had sufficient memory capacity to process them without interrupting active streams. This proves that predictive sorting can drastically improve apparent responsiveness without requiring additional hardware compute power.
 
 \begin{figure}[h]
-\centerline{\includegraphics[width=0.45\textwidth]{fig2_latency.png}}
+\centerline{\includegraphics[width=\columnwidth]{fig2_latency.png}}
 \caption{Queue latency distribution demonstrating the elimination of Head-of-Line blocking via accurate OPT-125M LTR ranking, generated using matplotlib.}
 \label{fig:latency}
 \end{figure}
@@ -190,7 +192,7 @@ By sorting the waiting requests based on the complexity predicted by our OPT-125
 We injected heterogeneous prompt lengths to trigger divergent paths in the thresholding logic. Figure \ref{fig:cost} visualizes this critical decision boundary. For short sequences, the cost of dropping the request and recalculating the attention states later ($C_{Rec}$) remained below the static boundary of PCIe transfer latency ($C_{Swap}$). The system correctly triggered the Drop-and-Recompute protocol for these prompts, immediately returning an HTTP 429 error to the client. Conversely, when sequences exceeded this length, the system initiated the Save-and-Swap protocol, validating the dynamic flexibility of the equations under varying loads.
 
 \begin{figure}[h]
-\centerline{\includegraphics[width=0.45\textwidth]{fig3_cost.png}}
+\centerline{\includegraphics[width=\columnwidth]{fig3_cost.png}}
 \caption{Decision boundary intersection where recomputation cost surpasses static PCIe swap latency, generated using matplotlib.}
 \label{fig:cost}
 \end{figure}
@@ -199,25 +201,25 @@ We injected heterogeneous prompt lengths to trigger divergent paths in the thres
 The core hardware benefit of the Drop-and-Recompute strategy is the preservation of data transfer bandwidth. Figure \ref{fig:pcie} illustrates the PCIe bus saturation levels during high-load eviction cycles. Traditional systems that blindly swap every evicted cache block easily saturate the bus, creating a secondary bottleneck that throttles the compute kernels. The Decoupled Gatekeeper reduces total data transfer significantly by abandoning short-context states that are computationally cheap to reconstruct, reserving the bus strictly for massive KV cache structures that must be saved.
 
 \begin{figure}[h]
-\centerline{\includegraphics[width=0.45\textwidth]{fig4_pcie.png}}
+\centerline{\includegraphics[width=\columnwidth]{fig4_pcie.png}}
 \caption{PCIe bandwidth utilization reduction achieved by thresholding swap operations, generated using matplotlib.}
 \label{fig:pcie}
 \end{figure}
 
 \subsection{VRAM Allocation Ceilings}
-To empirically prove that our middleware prevents allocation faults, we tracked the simulated GPU VRAM utilization across an extended stress test. As shown in Figure \ref{fig:vram}, the physical memory footprint remains entirely stable and perfectly capped at the maximum allowed threshold. The asynchronous yielding mechanism inside the Gatekeeper physically prevents the C++ memory manager from receiving execution commands that would exceed this ceiling, completely neutralizing the cascading memory faults observed in unprotected systems.
+To empirically prove that our middleware prevents allocation faults, we tracked the simulated GPU VRAM utilization across an extended stress test. As shown in Figure \ref{fig:vram}, the physical memory footprint remains entirely stable and perfectly capped at the maximum allowed threshold. The asynchronous yielding mechanism inside the Gatekeeper physically prevents the C++ memory manager from receiving execution commands that would exceed this ceiling, completely neutralizing the cascading memory faults observed in unprotected systems. The strict enforcement of this boundary validates the primary hypothesis of the architecture.
 
 \begin{figure}[h]
-\centerline{\includegraphics[width=0.45\textwidth]{fig5_vram.png}}
+\centerline{\includegraphics[width=\columnwidth]{fig5_vram.png}}
 \caption{Stabilized GPU VRAM allocation managed by the asynchronous yielding mechanism, generated using matplotlib.}
 \label{fig:vram}
 \end{figure}
 
 \subsection{Predictor Regularization and Loss}
-Finally, Figure \ref{fig:loss} tracks the training loss of the OPT-125M predictor in the LMSYS-Chat-1M dataset. The application of regularization of L2 effectively closed the generalization gap between the training and validation sets. This confirms that the predictor successfully learned to interpret generative complexity without overfitting to the structural syntax of the synthetic prompts, allowing it to maintain high accuracy when routing out-of-distribution human traffic during the live simulations.
+Finally, Figure \ref{fig:loss} tracks the training loss of the OPT-125M predictor on the LMSYS-Chat-1M dataset. The application of L2 regularization effectively closed the generalization gap between the training and validation sets. This confirms that the predictor successfully learned to interpret generative complexity without overfitting to the structural syntax of the synthetic prompts, allowing it to maintain high accuracy when routing out-of-distribution human traffic during the live simulations.
 
 \begin{figure}[h]
-\centerline{\includegraphics[width=0.45\textwidth]{fig6_loss.png}}
+\centerline{\includegraphics[width=\columnwidth]{fig6_loss.png}}
 \caption{Validation loss curve for the OPT-125M LTR predictor demonstrating generalized learning, generated using matplotlib.}
 \label{fig:loss}
 \end{figure}
@@ -225,38 +227,40 @@ Finally, Figure \ref{fig:loss} tracks the training loss of the OPT-125M predicto
 
 
 % ---------------------------------------------------
-% DISCUSSION (1 Page, Starts New Page)
+% DISCUSSION 
 % ---------------------------------------------------
 \section{Discussion}
-The empirical results compiled in this study confirm that shifting KV cache eviction and request scheduling logic from a reactive, tightly-coupled C++ engine layer into a proactive, decoupled Python middleware layer yields profound systemic stability. The data explicitly prove that mathematical thresholding of recomputation costs against swap latencies successfully prevents PCIe bandwidth saturation and completely eliminates the allocation-induced memory faults that plague FCFS architectures during peak traffic surges. This matters deeply for enterprise AI deployments, as it proves that hardware limitations on VRAM can be effectively circumvented through intelligent API-layer queuing rather than necessitating continuous, expensive hardware upgrades.
+The empirical results compiled in this study confirm that shifting KV cache eviction and request scheduling logic from a reactive, tightly-coupled C++ engine layer into a proactive, decoupled Python middleware layer yields profound systemic stability. The data explicitly proves that mathematical thresholding of recomputation costs against swap latencies successfully prevents PCIe bandwidth saturation and completely eliminates the allocation-induced memory faults that plague FCFS architectures during peak traffic surges. This matters deeply for enterprise AI deployments, as it proves that hardware limitations on VRAM can be effectively circumvented through intelligent API-layer queuing rather than necessitating continuous, expensive hardware upgrades.
 
-Critically, our application of L2 regularization to an OPT-125M predictor trained on the LMSYS-Chat-1M dataset successfully resolved the catastrophic overfitting observed in the previous literature. By forcing the model to prioritize generative complexity over memorized structural templates, the ranker remained highly accurate when exposed to unpredictable human traffic, effectively neutralizing Head-of-Line blocking and improving interactive latency by over 30\%. 
+Critically, our application of L2 regularization to an OPT-125M predictor trained on the LMSYS-Chat-1M dataset successfully resolved the catastrophic overfitting observed in previous literature. By forcing the model to prioritize generative complexity over memorized structural templates, the ranker remained highly accurate when exposed to unpredictable human traffic. This robust prediction capability effectively neutralized Head-of-Line blocking and improved interactive latency by over 30\%, validating the feasibility of machine learning models acting as direct traffic controllers for low-level systems architecture.
 
-However, during our stress tests, we discovered a fascinating real-world limitation that highlights a severe vulnerability in all LTR-based scheduling. During a testing burst, a massive essay prompt was submitted to the queue. Our predictor hallucinated, predicting the essay would require zero tokens to generate, and assigned it the highest possible priority. Because the priority queue processes lower numbers first, the gatekeeper accidentally allowed the heaviest, most expensive request to skip the line entirely. This edge case proves that a Decoupled Gatekeeper is entirely at the mercy of its predictor. If the model hallucinates, the scheduler fails and immediately reverts back to Head-of-Line blocking. We acknowledge this candidly, as it validates exactly why we prioritized L2 regularization in our methodology; without strict mathematical constraints on the predictor, the entire architecture breaks down.
+However, during our stress testing, we discovered a fascinating real-world limitation that highlights a severe vulnerability in all LTR-based scheduling. During a testing burst, a massive essay prompt was submitted to the queue. Our predictor hallucinated, predicting the essay would require zero tokens to generate, and assigned it the highest possible priority. Because the priority queue processes lower numbers first, the gatekeeper accidentally allowed the heaviest, most expensive request to skip the line entirely. This edge case proves that a Decoupled Gatekeeper is entirely at the mercy of its predictor. If the model hallucinates, the scheduler fails and immediately reverts back to Head-of-Line blocking. We acknowledge this candidly, as it validates exactly why we prioritized L2 regularization in our methodology; without strict mathematical constraints on the predictor, the entire architecture breaks down entirely.
 
-If this work were to continue for the next 6 months, future research directions would focus on extending the asynchronous middleware to support multi-node clustered environments. Evaluating the gatekeeper's ability to threshold and route traffic dynamically across distributed network interconnects—such as NVLink or InfiniBand—rather than just a local PCIe bus would validate the architecture for massive-scale datacenter deployments. Additionally, refining the predictor to account for speculative decoding techniques could further optimize the recomputation equations and eliminate the hallucination edge cases entirely.
+If this work were to continue for the next 6 months, future research directions would focus on extending the asynchronous middleware to support multi-node clustered environments. Evaluating the gatekeeper's ability to threshold and route traffic dynamically across distributed network interconnects—such as NVLink or InfiniBand—rather than just a local PCIe bus would validate the architecture for massive-scale datacenter deployments. Additionally, refining the predictor to account for speculative decoding techniques could further optimize the recomputation equations and eliminate the hallucination edge cases entirely by integrating confidence scoring directly into the priority calculations.
+
+
 
 
 % ---------------------------------------------------
-% CONCLUSION (1 Paragraph, Starts New Page)
+% CONCLUSION 
 % ---------------------------------------------------
 \section{Conclusion}
-This research successfully challenged the prevailing paradigm of tightly coupling scheduling algorithms directly within the fragile internal memory managers of LLM serving engines. By extracting admission control logic into a Python-based Decoupled Gatekeeper, neutralizing the overfitting vulnerability through a regularized OPT-125M predictor, and implementing a real-time mathematical thresholding mechanism, our architecture achieved a zero-fault survival rate under extreme concurrency. Ultimately, this approach proves that unparalleled stability in high-throughput AI inference can be achieved through intelligent request routing at the API layer, providing a highly resilient, cost-effective blueprint for scaling generative deployments.
+This research successfully challenged the prevailing paradigm of tightly coupling scheduling algorithms directly within the fragile internal memory managers of LLM serving engines. By extracting the admission control logic into a Python-based Decoupled Gatekeeper, neutralizing the overfitting vulnerability through a regularized OPT-125M predictor, and implementing a real-time mathematical thresholding mechanism, our architecture achieved a zero-fault survival rate under extreme concurrency. Ultimately, this approach proves that unparalleled stability in high-throughput AI inference can be achieved through intelligent request routing at the API layer, providing a highly resilient, cost-effective blueprint for scaling generative deployments.
 
 
 
 % ---------------------------------------------------
-% APPENDIX A (Starts New Page, 1 Figure, No Text)
+% APPENDIX A 
 % ---------------------------------------------------
 \section*{Appendix A}
-\begin{figure}[h]
-\centerline{\includegraphics[width=0.45\textwidth]{latex_source.png}}
+\begin{figure}[H]
+\centerline{\includegraphics[width=\columnwidth]{latex_source.png}}
 \end{figure}
 
 
 
 % ---------------------------------------------------
-% REFERENCES (Starts New Page, Unlimited length)
+% REFERENCES 
 % ---------------------------------------------------
 \bibliographystyle{IEEEtran}
 \begin{thebibliography}{00}
