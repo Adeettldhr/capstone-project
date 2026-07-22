@@ -1,4 +1,3 @@
-
 # Import asyncio for asynchronous programming, task management, queues, and semaphores
 import asyncio
 
@@ -10,6 +9,9 @@ import uvicorn
 
 # Import os to access environment variables
 import os
+
+# Import re for safe regex parsing of LLM outputs
+import re
 
 # Import dataclass utilities to create a structured request object
 from dataclasses import dataclass, field
@@ -76,15 +78,16 @@ CLIENT_TIMEOUT_SECONDS = 30.0
 # Mock predictor used to estimate the expected response length of a request
 class PredictorMock:
 
-    # Predict the approximate number of words/tokens expected in the response
     @staticmethod
     async def rank_request(prompt: str) -> int:
+        # 1. Deterministic Tokenizer Baseline (using word split as basic BPE proxy)
+        input_tokens = len(prompt.split())
+        
         try:
             # Ask the Groq model to predict the expected answer length
             response = await groq_client.chat.completions.create(
                 # Specify the Groq model being used
                 model="llama-3.1-8b-instant",
-
                 # Send the prediction request to the model
                 messages=[
                     {
@@ -92,24 +95,33 @@ class PredictorMock:
                         "content": f"Reply with only a single number. How many words will your answer be if I asked you this: {prompt}"
                     }
                 ],
-
                 # Limit the prediction response to a small number of tokens
-                max_tokens=10
+                max_tokens=10,
+                # Force deterministic behavior
+                temperature=0.0 
             )
 
-            # Convert the model's response into an integer
-            # This integer is used as the request priority
-            predicted_length = int(response.choices[0].message.content.strip())
+            content = response.choices[0].message.content.strip()
+            
+            # Safely extract the first number found in the string
+            match = re.search(r'\d+', content)
+            if match:
+                predicted_length = int(match.group())
+            else:
+                predicted_length = int(input_tokens * 2.5)
+
+            # 2. THE DETERMINISTIC FALLBACK
+            # If the prompt is massive but the model predicts a tiny output (hallucination)
+            if input_tokens > 15 and predicted_length < 50:
+                print(f"🛡️ [FALLBACK] Hallucination detected! Overriding priority for input length {input_tokens}.")
+                return 9999  # Clamp to lowest possible priority (highest number)
 
             # Return the predicted response length
             return predicted_length
 
-        except:
-            # If the API request fails, estimate the response length
-            # based on the number of words in the input prompt
-            input_tokens = len(prompt.split())
-
-            # Estimate the output length as 2.5 times the input length
+        except Exception as e:
+            # Fallback heuristic if API fails entirely
+            print(f"⚠️ [API ERROR] Predictor failed, using heuristic fallback. {e}")
             return int(input_tokens * 2.5)
 
 
@@ -404,4 +416,3 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=8000
     )
-
